@@ -86,6 +86,18 @@ def init_db():
             FOREIGN KEY (produto_id) REFERENCES produtos(id)
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS funcionarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            cpf TEXT UNIQUE,
+            telefone TEXT,
+            funcao TEXT NOT NULL,
+            data_admissao TEXT,
+            salario REAL,
+            status TEXT DEFAULT 'Ativo'
+        )
+    ''')
     
     conn.commit()
     conn.close()
@@ -160,6 +172,32 @@ class Database:
     def listar_produtos(self):
         self.cursor.execute("SELECT id, codigo, descricao, quantidade, preco_venda FROM produtos")
         return self.cursor.fetchall()
+
+    def cadastrar_funcionario(self, nome, cpf, telefone, funcao, data_admissao, salario):
+        try:
+            self.cursor.execute("""INSERT INTO funcionarios (nome, cpf, telefone, funcao, data_admissao, salario) 
+                                 VALUES (?, ?, ?, ?, ?, ?)""", 
+                               (nome, cpf, telefone, funcao, data_admissao, salario))
+            self.conn.commit()
+            return self.cursor.lastrowid
+        except sqlite3.IntegrityError:
+            return None  # CPF já existe
+
+    def listar_funcionarios(self):
+        self.cursor.execute("SELECT id, nome, funcao, telefone, status FROM funcionarios ORDER BY nome")
+        return self.cursor.fetchall()
+
+    def excluir_funcionario(self, funcionario_id):
+        try:
+            # Verificar se o funcionário tem ordens de serviço associadas
+            self.cursor.execute("SELECT COUNT(*) FROM ordens_servico WHERE cliente_id IN (SELECT id FROM clientes WHERE id = ?)", (funcionario_id,))
+            # Por enquanto, vamos permitir exclusão - pode ser expandido depois
+            self.cursor.execute("DELETE FROM funcionarios WHERE id = ?", (funcionario_id,))
+            self.conn.commit()
+            return True, "Funcionário excluído com sucesso!"
+        except Exception as e:
+            self.conn.rollback()
+            return False, f"Erro ao excluir funcionário: {str(e)}"
 
     def verificar_estoque(self, produto_id, quantidade):
         self.cursor.execute("SELECT quantidade FROM produtos WHERE id = ?", (produto_id,))
@@ -724,13 +762,125 @@ class VendaProdutosDialog(QDialog):
         else:
             QMessageBox.critical(self, "Erro", "Erro ao finalizar venda. Verifique o estoque!")
 
+# Janela para cadastro de funcionários
+class CadastroFuncionarioDialog(QDialog):
+    def __init__(self, db):
+        super().__init__()
+        self.db = db
+        self.setWindowTitle("Cadastrar Funcionário")
+        self.setFixedSize(400, 350)
+        self.setStyleSheet("""
+            QDialog {background-color: #f5f5f5;}
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 8px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {background-color: #2980b9;}
+            QLabel {font-weight: bold;}
+        """)
+
+        layout = QVBoxLayout(self)
+        
+        form_layout = QFormLayout()
+        form_layout.setSpacing(15)
+        
+        self.nome = QLineEdit()
+        self.nome.setPlaceholderText("Nome completo")
+        
+        self.cpf = QLineEdit()
+        self.cpf.setPlaceholderText("000.000.000-00")
+        
+        self.telefone = QLineEdit()
+        self.telefone.setPlaceholderText("11999999999")
+        telefone_validator = QRegExpValidator(QRegExp(r'\d{0,11}'))
+        self.telefone.setValidator(telefone_validator)
+        
+        self.funcao_combo = QComboBox()
+        self.funcao_combo.addItem("Selecione uma função...", "")
+        funcoes = ["Administrador", "Mecânico", "Serviços Gerais", "Vendas"]
+        for funcao in funcoes:
+            self.funcao_combo.addItem(funcao, funcao)
+        
+        self.data_admissao = QLineEdit()
+        self.data_admissao.setPlaceholderText("DD/MM/AAAA")
+        
+        self.salario = QLineEdit()
+        self.salario.setPlaceholderText("0.00")
+        salario_validator = QRegExpValidator(QRegExp(r'\d*\.?\d{0,2}'))
+        self.salario.setValidator(salario_validator)
+        
+        form_layout.addRow("Nome:", self.nome)
+        form_layout.addRow("CPF:", self.cpf)
+        form_layout.addRow("Telefone (11 dígitos):", self.telefone)
+        form_layout.addRow("Função:", self.funcao_combo)
+        form_layout.addRow("Data Admissão:", self.data_admissao)
+        form_layout.addRow("Salário (R$):", self.salario)
+        
+        layout.addLayout(form_layout)
+        
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        btn_cancelar = QPushButton("Cancelar")
+        btn_cancelar.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancelar)
+        
+        btn_salvar = QPushButton("Salvar")
+        btn_salvar.clicked.connect(self.salvar)
+        btn_layout.addWidget(btn_salvar)
+        
+        layout.addSpacing(10)
+        layout.addLayout(btn_layout)
+
+    def salvar(self):
+        nome = self.nome.text().strip()
+        cpf = self.cpf.text().strip()
+        telefone = self.telefone.text().strip()
+        funcao = self.funcao_combo.currentData()
+        data_admissao = self.data_admissao.text().strip()
+        salario_text = self.salario.text().strip()
+        
+        if not nome:
+            QMessageBox.warning(self, "Erro", "Nome é obrigatório!")
+            return
+            
+        if not funcao:
+            QMessageBox.warning(self, "Erro", "Selecione uma função!")
+            return
+            
+        if cpf and len(cpf.replace(".", "").replace("-", "")) != 11:
+            QMessageBox.warning(self, "Erro", "CPF deve ter 11 dígitos!")
+            return
+            
+        if telefone and len(telefone) != 11:
+            QMessageBox.warning(self, "Erro", "Telefone deve ter 11 dígitos!")
+            return
+            
+        try:
+            salario = float(salario_text) if salario_text else 0.0
+        except ValueError:
+            QMessageBox.warning(self, "Erro", "Salário deve ser um valor numérico!")
+            return
+            
+        funcionario_id = self.db.cadastrar_funcionario(nome, cpf, telefone, funcao, data_admissao, salario)
+        
+        if funcionario_id is None:
+            QMessageBox.warning(self, "Erro", "CPF já cadastrado!")
+            return
+            
+        QMessageBox.information(self, "Sucesso", "Funcionário cadastrado com sucesso!")
+        self.accept()
+
 # Janela principal
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.db = Database()
         self.setWindowTitle("Sistema de Gestão - Oficina de Motos")
-        self.setMinimumSize(1000, 700)
+        self.setMinimumSize(1200, 800)
         self.setStyleSheet("""
             QMainWindow {background-color: #f5f5f5;}
             QPushButton {
@@ -739,7 +889,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 padding: 10px;
                 border-radius: 5px;
-                font-size: 12px;
+                font-size: 16px;
                 font-weight: bold;
             }
             QPushButton:hover {background-color: #2980b9;}
@@ -751,9 +901,10 @@ class MainWindow(QMainWindow):
             }
             QTableWidget QHeaderView::section {
                 background-color: #3498db;
-                padding: 5px;
+                padding: 8px;
                 color: white;
                 font-weight: bold;
+                font-size: 14px;
                 border: 0px;
             }
         """)
@@ -766,8 +917,8 @@ class MainWindow(QMainWindow):
         
         # Título e imagem do sistema
         header_layout = QHBoxLayout()
-        logo_label = QLabel("SISTEMA DE OFICINA DE MOTOS")
-        logo_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #333;")
+        logo_label = QLabel("SISTEMA DE GESTÃO - OFICINA DE MOTOS")
+        logo_label.setStyleSheet("font-size: 28px; font-weight: bold; color: #2c3e50;")
         header_layout.addWidget(logo_label)
         header_layout.addStretch()
         main_layout.addLayout(header_layout)
@@ -777,18 +928,18 @@ class MainWindow(QMainWindow):
         
         # Painel de botões à esquerda
         button_panel = QWidget()
-        button_panel.setFixedWidth(250)
-        button_panel.setStyleSheet("background-color: #444; border-radius: 10px;")
+        button_panel.setFixedWidth(300)
+        button_panel.setStyleSheet("background-color: #2c3e50; border-radius: 10px;")
         button_layout = QVBoxLayout(button_panel)
-        button_layout.setSpacing(10)
-        button_layout.setContentsMargins(10, 20, 10, 20)
+        button_layout.setSpacing(15)
+        button_layout.setContentsMargins(15, 25, 15, 25)
         
         # Título do painel
         panel_title = QLabel("CONTROLES")
-        panel_title.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
+        panel_title.setStyleSheet("color: white; font-size: 18px; font-weight: bold;")
         panel_title.setAlignment(Qt.AlignCenter)
         button_layout.addWidget(panel_title)
-        button_layout.addSpacing(10)
+        button_layout.addSpacing(15)
         
         # Categorias de botões
         categories = {
@@ -796,6 +947,10 @@ class MainWindow(QMainWindow):
                 ("Cadastrar Cliente", self.cadastrar_cliente),
                 ("Cadastrar Moto", self.cadastrar_moto),
                 ("Cadastrar Produto", self.cadastrar_produto)
+            ],
+            "Funcionários": [
+                ("Cadastrar Funcionário", self.cadastrar_funcionario),
+                ("Listar Funcionários", self.listar_funcionarios)
             ],
             "Operações": [
                 ("Nova Ordem de Serviço", self.nova_os),
@@ -810,7 +965,7 @@ class MainWindow(QMainWindow):
         
         for category, buttons in categories.items():
             cat_label = QLabel(category)
-            cat_label.setStyleSheet("color: #3498db; font-size: 14px; font-weight: bold;")
+            cat_label.setStyleSheet("color: #3498db; font-size: 16px; font-weight: bold; margin-top: 10px;")
             button_layout.addWidget(cat_label)
             
             for btn_text, btn_function in buttons:
@@ -818,11 +973,15 @@ class MainWindow(QMainWindow):
                 btn.clicked.connect(btn_function)
                 btn.setStyleSheet("""
                     QPushButton {
-                        background-color: #555;
+                        background-color: #34495e;
                         color: white;
                         text-align: left;
-                        padding: 12px;
-                        border-radius: 5px;
+                        padding: 18px 25px;
+                        border-radius: 8px;
+                        font-size: 13px;
+                        font-weight: bold;
+                        margin-left: 10px;
+                        margin-right: 10px;
                     }
                     QPushButton:hover {
                         background-color: #3498db;
@@ -830,7 +989,7 @@ class MainWindow(QMainWindow):
                 """)
                 button_layout.addWidget(btn)
             
-            button_layout.addSpacing(10)
+            button_layout.addSpacing(15)
         
         button_layout.addStretch()
         
@@ -841,11 +1000,12 @@ class MainWindow(QMainWindow):
         # Barra de pesquisa
         search_layout = QHBoxLayout()
         search_label = QLabel("Pesquisar:")
+        search_label.setStyleSheet("font-size: 14px; font-weight: bold;")
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Digite para pesquisar...")
-        self.search_input.setStyleSheet("padding: 8px; border-radius: 5px; border: 1px solid #ddd;")
+        self.search_input.setStyleSheet("padding: 10px; border-radius: 5px; border: 1px solid #ddd; font-size: 14px;")
         search_button = QPushButton("Buscar")
-        search_button.clicked.connect(self.search)
+        search_button.setStyleSheet("font-size: 14px; padding: 10px 20px;")
         
         search_layout.addWidget(search_label)
         search_layout.addWidget(self.search_input, 1)
@@ -855,7 +1015,7 @@ class MainWindow(QMainWindow):
         
         # Status atual
         self.status_label = QLabel("Bem-vindo ao Sistema de Gestão de Oficina")
-        self.status_label.setStyleSheet("color: #555; font-size: 14px; margin-top: 5px;")
+        self.status_label.setStyleSheet("color: #555; font-size: 16px; margin-top: 10px; font-weight: bold;")
         content_layout_right.addWidget(self.status_label)
         
         # Tabela
@@ -870,12 +1030,13 @@ class MainWindow(QMainWindow):
         action_layout.addStretch()
         
         self.edit_btn = QPushButton("Editar")
+        self.edit_btn.setStyleSheet("font-size: 14px; padding: 12px 25px; background-color: #f39c12; color: white; font-weight: bold;")
         self.edit_btn.clicked.connect(self.edit_selected)
         action_layout.addWidget(self.edit_btn)
         
         self.delete_btn = QPushButton("Excluir")
+        self.delete_btn.setStyleSheet("font-size: 14px; padding: 12px 25px; background-color: #e74c3c; color: white; font-weight: bold;")
         self.delete_btn.clicked.connect(self.delete_selected)
-        self.delete_btn.setStyleSheet("background-color: #e74c3c;")
         action_layout.addWidget(self.delete_btn)
         
         content_layout_right.addLayout(action_layout)
@@ -911,6 +1072,12 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Moto cadastrada com sucesso!")
             # Atualiza a tabela se estiver mostrando motos de um cliente específico
             self._atualizar_visualizacao_atual()
+    
+    def cadastrar_funcionario(self):
+        dialog = CadastroFuncionarioDialog(self.db)
+        if dialog.exec_() == QDialog.Accepted:
+            self.status_label.setText("Funcionário cadastrado com sucesso!")
+            self.listar_funcionarios()  # Atualiza a tabela se estiver na visualização de funcionários
     
     def nova_os(self):
         dialog = OrdemServicoDialog(self.db)
@@ -1019,6 +1186,21 @@ class MainWindow(QMainWindow):
                 
         self.table.resizeColumnsToContents()
     
+    def listar_funcionarios(self):
+        self.status_label.setText("Lista de Funcionários")
+        self.table.clear()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["ID", "Nome", "Função", "Status"])
+        
+        funcionarios = self.db.listar_funcionarios()
+        
+        self.table.setRowCount(len(funcionarios))
+        for i, funcionario in enumerate(funcionarios):
+            for j, value in enumerate(funcionario):
+                self.table.setItem(i, j, QTableWidgetItem(str(value)))
+                
+        self.table.resizeColumnsToContents()
+    
     def search(self):
         query = self.search_input.text().strip().lower()
         self.status_label.setText(f"Pesquisando por: {query}")
@@ -1067,6 +1249,20 @@ class MainWindow(QMainWindow):
                     else:
                         QMessageBox.warning(self, "Erro", mensagem)
                         
+            elif texto_status.startswith("Lista de Funcionários"):
+                reply = QMessageBox.question(self, 'Confirmar Exclusão', 
+                                            f"Tem certeza que deseja excluir o funcionário '{item_nome}' (ID: {item_id})?\n\n"
+                                            "Esta ação não pode ser desfeita.",
+                                            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    sucesso, mensagem = self.db.excluir_funcionario(int(item_id))
+                    if sucesso:
+                        QMessageBox.information(self, "Sucesso", mensagem)
+                        self.status_label.setText("Funcionário excluído com sucesso!")
+                        self.listar_funcionarios()  # Atualiza a lista
+                    else:
+                        QMessageBox.warning(self, "Erro", mensagem)
+                        
             elif texto_status.startswith("Lista de Produtos"):
                 # Implementar exclusão de produtos futuramente
                 QMessageBox.information(self, "Informação", "Funcionalidade de exclusão de produtos em desenvolvimento.")
@@ -1085,6 +1281,8 @@ class MainWindow(QMainWindow):
         texto = self.status_label.text()
         if texto.startswith("Lista de Clientes"):
             self.listar_clientes()
+        elif texto.startswith("Lista de Funcionários"):
+            self.listar_funcionarios()
         elif texto.startswith("Lista de Produtos"):
             self.listar_produtos()
         elif texto.startswith("Ordens de Serviço"):
